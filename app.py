@@ -5,12 +5,18 @@ import plotly.express as px
 import requests
 import pandas as pd
 
+from flask_caching import Cache
 from pathlib import Path
 
 external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
 
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 server = app.server
+cache = Cache(app.server, config={
+    'CACHE_TYPE': 'filesystem',
+    'CACHE_DIR': 'cache'
+})
+app.config.suppress_callback_exceptions = True
 
 # show latest date from files
 
@@ -28,79 +34,96 @@ data = [{
     'url': 'https://www.data.gouv.fr/fr/datasets/r/41b9bd2a-b5b6-4271-8878-e45a8902ef00'
 }]
 
-# download data w/ caching
-# TODO: handle cache elsewhere for dokku?
-data_path = Path('./data')
-data_path.mkdir(exist_ok=True)
-for item in data:
-    r = requests.head(item['url'])
-    location = r.headers['Location']
-    filename = location.split('/')[-1]
-    filepath = data_path / filename
-    if not filepath.exists():
-        r = requests.get(location)
-        with open(filepath, 'wb') as dfile:
-            dfile.write(r.content)
-    item['filepath'] = filepath
 
-# hospi
+def is_cache_invalid():
+    has_changed = False
+    # download data w/ caching
+    # TODO: handle cache elsewhere for dokku?
+    data_path = Path('./data')
+    data_path.mkdir(exist_ok=True)
+    for item in data:
+        r = requests.head(item['url'])
+        location = r.headers['Location']
+        filename = location.split('/')[-1]
+        filepath = data_path / filename
+        if not filepath.exists():
+            has_changed = True
+            r = requests.get(location)
+            with open(filepath, 'wb') as dfile:
+                dfile.write(r.content)
+        item['filepath'] = filepath
+    return has_changed
 
-datum = [d for d in data if d['id'] == 'hospi'][0]
-cols = ["hosp", "rea", "rad", "dc"]
-df_hospi = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
-df_hospi = df_hospi[df_hospi["sexe"] == 0].groupby(["jour"], as_index=False).agg({k: sum for k in cols})
 
-fig_hospi = px.bar(df_hospi, x="jour", y=cols, title="Données hospitalières")
+@cache.cached(unless=is_cache_invalid)
+def do_update_data():
+    # hospi
 
-# hospi_nouveaux
+    datum = [d for d in data if d['id'] == 'hospi'][0]
+    cols = ["hosp", "rea", "rad", "dc"]
+    df_hospi = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
+    df_hospi = df_hospi[df_hospi["sexe"] == 0].groupby(["jour"], as_index=False).agg({k: sum for k in cols})
 
-datum = [d for d in data if d['id'] == 'hospi_nouveaux'][0]
-cols = ["incid_hosp", "incid_rea", "incid_dc", "incid_rad"]
-df_hospi_nouveaux = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
-df_hospi_nouveaux = df_hospi_nouveaux.groupby(["jour"], as_index=False).agg({k: sum for k in cols})
+    fig_hospi = px.bar(df_hospi, x="jour", y=cols, title="Données hospitalières")
 
-fig_hospi_nouveaux = px.bar(df_hospi_nouveaux, x="jour", y=cols, title="Données hospitalières nouveaux")
+    # hospi_nouveaux
 
-# hospi_clage
+    datum = [d for d in data if d['id'] == 'hospi_nouveaux'][0]
+    cols = ["incid_hosp", "incid_rea", "incid_dc", "incid_rad"]
+    df_hospi_nouveaux = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
+    df_hospi_nouveaux = df_hospi_nouveaux.groupby(["jour"], as_index=False).agg({k: sum for k in cols})
 
-datum = [d for d in data if d['id'] == 'hospi_clage'][0]
-cols = ["hosp", "rea", "rad", "dc"]
-df_hospi_clage = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
-df_hospi_clage = df_hospi_clage.groupby(["jour", "cl_age90"], as_index=False).agg({k: sum for k in cols})
-df_hospi_clage["cl_age90"] = df_hospi_clage["cl_age90"].astype(str)
+    fig_hospi_nouveaux = px.bar(df_hospi_nouveaux, x="jour", y=cols, title="Données hospitalières nouveaux")
 
-figs_clage = []
-for c in cols:
-    fig = px.bar(df_hospi_clage, x="jour", y=[c], color="cl_age90", title=f"Données hospitalières clage {c}")
-    figs_clage.append(fig)
+    # hospi_clage
 
-# hospi_etab
+    datum = [d for d in data if d['id'] == 'hospi_clage'][0]
+    cols = ["hosp", "rea", "rad", "dc"]
+    df_hospi_clage = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
+    df_hospi_clage = df_hospi_clage.groupby(["jour", "cl_age90"], as_index=False).agg({k: sum for k in cols})
+    df_hospi_clage["cl_age90"] = df_hospi_clage["cl_age90"].astype(str)
 
-datum = [d for d in data if d['id'] == 'hospi_etab'][0]
-cols = ["nb"]
-df_hospi_etab = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
-df_hospi_etab = df_hospi_etab.groupby(["jour"], as_index=False).agg({k: sum for k in cols})
+    figs_clage = []
+    for c in cols:
+        fig = px.bar(df_hospi_clage, x="jour", y=[c], color="cl_age90", title=f"Données hospitalières clage {c}")
+        figs_clage.append(fig)
 
-fig_hospi_etab = px.bar(df_hospi_etab, x="jour", y=cols, title="Données hospitalières etab")
+    # hospi_etab
 
-app.layout = html.Div(children=[
-    html.H1(children='Données hospitalières SPF'),
-    dcc.Graph(
-        id='hospi',
-        figure=fig_hospi,
-    ),
-    dcc.Graph(
-        id='hospi_nouveaux',
-        figure=fig_hospi_nouveaux,
-    ),
-    *[
-        dcc.Graph(id=f'hospi_clage_{idx}', figure=fig) for idx, fig in enumerate(figs_clage)
-    ],
-    dcc.Graph(
-        id='hospi_etab',
-        figure=fig_hospi_etab,
-    ),
-])
+    datum = [d for d in data if d['id'] == 'hospi_etab'][0]
+    cols = ["nb"]
+    df_hospi_etab = pd.read_csv(datum['filepath'], delimiter=";", parse_dates=["jour"])
+    df_hospi_etab = df_hospi_etab.groupby(["jour"], as_index=False).agg({k: sum for k in cols})
+
+    fig_hospi_etab = px.bar(df_hospi_etab, x="jour", y=cols, title="Données hospitalières etab")
+
+    return fig_hospi, fig_hospi_nouveaux, figs_clage, fig_hospi_etab
+
+
+def serve_layout():
+    fig_hospi, fig_hospi_nouveaux, figs_clage, fig_hospi_etab = do_update_data()
+    return html.Div(children=[
+        html.H1(children='Données hospitalières SPF'),
+        dcc.Graph(
+            id='hospi',
+            figure=fig_hospi,
+        ),
+        dcc.Graph(
+            id='hospi_nouveaux',
+            figure=fig_hospi_nouveaux,
+        ),
+        *[
+            dcc.Graph(id=f'hospi_clage_{idx}', figure=fig) for idx, fig in enumerate(figs_clage)
+        ],
+        dcc.Graph(
+            id='hospi_etab',
+            figure=fig_hospi_etab,
+        ),
+    ])
+
+
+app.layout = serve_layout
+
 
 if __name__ == '__main__':
     app.run_server(debug=True)
